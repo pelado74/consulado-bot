@@ -192,11 +192,74 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(estado).encode())
+        elif self.path == "/api/test":
+            resultado = enviar_test()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(resultado).encode())
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(DASHBOARD_HTML.encode())
+
+
+def enviar_test():
+    """Envía mensaje de prueba a todos los canales"""
+    resultado = {"telegram": False, "email": False, "errores": []}
+    hora = hora_argentina().strftime("%H:%M:%S")
+    
+    # Test Telegram
+    msg_tg = f"""✅ <b>TEST - Bot Funcionando</b>
+
+🕐 Hora: {hora}
+📊 Verificaciones: {estado['verificaciones']}
+
+Este es un mensaje de prueba. Cuando haya turnos, recibirás una alerta similar pero con el link para reservar."""
+    
+    if enviar_telegram(msg_tg):
+        resultado["telegram"] = True
+        log("✅ Test Telegram enviado", "success")
+    else:
+        resultado["errores"].append("Telegram: Token o Chat ID no configurado")
+        log("❌ Test Telegram falló", "error")
+    
+    # Test Email
+    if SMTP_EMAIL and SMTP_PASSWORD:
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = SMTP_EMAIL
+            msg['Subject'] = "✅ TEST - Bot Consulado España Funcionando"
+            html = f"""
+            <div style="font-family:Arial;padding:20px;text-align:center;">
+                <h1 style="color:#00aa55;">✅ Test Exitoso</h1>
+                <p>El bot está funcionando correctamente.</p>
+                <p>Hora del test: {hora}</p>
+                <p>Verificaciones realizadas: {estado['verificaciones']}</p>
+                <hr>
+                <p style="color:#666;">Cuando haya turnos disponibles, recibirás un email con el link para reservar.</p>
+            </div>
+            """
+            msg.attach(MIMEText(html, 'html'))
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            for email in EMAILS_DESTINO:
+                msg['To'] = email
+                server.send_message(msg)
+                del msg['To']
+            server.quit()
+            resultado["email"] = True
+            log("✅ Test Email enviado", "success")
+        except Exception as e:
+            resultado["errores"].append(f"Email: {str(e)[:50]}")
+            log(f"❌ Test Email falló: {e}", "error")
+    else:
+        resultado["errores"].append("Email: SMTP no configurado")
+    
+    return resultado
 
 
 DASHBOARD_HTML = """
@@ -375,6 +438,42 @@ DASHBOARD_HTML = """
             <div class="ultima-verif">
                 Última verificación: <span id="ultimaVerif">-</span>
             </div>
+            
+            <div style="text-align: center; margin-top: 25px;">
+                <a href="https://www.cgeonline.com.ar/tramites/citas/varios/cita-varios.html?t=4" target="_blank" style="
+                    display: inline-block;
+                    background: linear-gradient(135deg, #ff4757 0%, #c41e3a 100%);
+                    color: white;
+                    text-decoration: none;
+                    padding: 20px 50px;
+                    border-radius: 30px;
+                    font-size: 1.3em;
+                    font-weight: bold;
+                    cursor: pointer;
+                    transition: transform 0.2s, box-shadow 0.2s;
+                    box-shadow: 0 6px 20px rgba(196, 30, 58, 0.5);
+                    margin-bottom: 15px;
+                " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
+                    🇪🇸 SOLICITAR CITA AHORA
+                </a>
+            </div>
+            
+            <div style="text-align: center; margin-top: 15px;">
+                <button id="btnTest" onclick="enviarTest()" style="
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    border: none;
+                    padding: 15px 30px;
+                    border-radius: 25px;
+                    font-size: 1em;
+                    cursor: pointer;
+                    transition: transform 0.2s, box-shadow 0.2s;
+                    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+                ">
+                    📨 Enviar Notificación de Prueba
+                </button>
+                <div id="testResult" style="margin-top: 15px; font-size: 0.9em;"></div>
+            </div>
         </div>
         
         <div class="status-card historial">
@@ -442,6 +541,42 @@ DASHBOARD_HTML = """
         
         actualizar();
         setInterval(actualizar, 2000);
+        
+        async function enviarTest() {
+            const btn = document.getElementById('btnTest');
+            const result = document.getElementById('testResult');
+            
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Enviando...';
+            result.innerHTML = '';
+            
+            try {
+                const r = await fetch('/api/test');
+                const data = await r.json();
+                
+                let html = '';
+                if (data.telegram) {
+                    html += '<span style="color: #00ff88;">✅ Telegram enviado</span><br>';
+                } else {
+                    html += '<span style="color: #ff4757;">❌ Telegram falló</span><br>';
+                }
+                if (data.email) {
+                    html += '<span style="color: #00ff88;">✅ Email enviado</span><br>';
+                } else {
+                    html += '<span style="color: #ff4757;">❌ Email no configurado</span><br>';
+                }
+                if (data.errores && data.errores.length > 0) {
+                    html += '<br><span style="color: #ffa502; font-size: 0.85em;">' + data.errores.join('<br>') + '</span>';
+                }
+                result.innerHTML = html;
+                
+            } catch (e) {
+                result.innerHTML = '<span style="color: #ff4757;">Error de conexión</span>';
+            }
+            
+            btn.disabled = false;
+            btn.innerHTML = '📨 Enviar Notificación de Prueba';
+        }
     </script>
 </body>
 </html>
