@@ -149,16 +149,35 @@ def verificar_turnos():
         }
         r = requests.get(URL_TURNOS, headers=headers, timeout=15)
         texto = r.text.lower()
+        status = r.status_code
         
+        # Guardar info de debug
+        estado["ultimo_status_code"] = status
+        estado["ultimo_tamaño_pagina"] = len(r.text)
+        
+        # Detectar 404 real (en el contenido)
+        if "error 404" in texto or "página no encontrada" in texto:
+            return False, f"⚠️ ERROR 404 (código: {status}, tamaño: {len(r.text)})"
+        
+        # Detectar página correcta con mensaje de no disponibilidad
         if "en este momento no hay citas disponibles" in texto:
-            return False, "No hay citas disponibles"
-        if "error 404" in texto:
-            return False, "Página no disponible"
+            return False, f"No hay citas (HTTP {status}, {len(r.text)} bytes)"
+        
+        # Detectar si hay turnos disponibles
         if "alta en matrícula" in texto and "no hay citas" not in texto:
-            return True, "¡POSIBLES TURNOS!"
-        return False, "Sin turnos"
+            # Verificar si hay elementos de selección
+            tiene_seleccion = any(x in texto for x in ["seleccione", "elegir fecha", "calendario", "horario disponible"])
+            if tiene_seleccion:
+                return True, "¡TURNOS DETECTADOS! - Hay opciones de selección"
+            return True, "¡POSIBLES TURNOS! - Página cambió"
+        
+        # Estado desconocido - loguear para debug
+        return False, f"Estado desconocido (HTTP {status}, {len(r.text)} bytes)"
+        
+    except requests.exceptions.Timeout:
+        return None, "Timeout - servidor lento"
     except Exception as e:
-        return None, f"Error: {str(e)[:30]}"
+        return None, f"Error: {str(e)[:40]}"
 
 
 # ============== DASHBOARD WEB ==============
@@ -342,6 +361,17 @@ DASHBOARD_HTML = """
                 </div>
             </div>
             
+            <div class="stats" style="margin-top: 15px;">
+                <div class="stat">
+                    <div class="stat-value" id="httpCode" style="color: #ffa502;">-</div>
+                    <div class="stat-label">HTTP Status</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="pageSize" style="color: #ffa502;">-</div>
+                    <div class="stat-label">Tamaño página</div>
+                </div>
+            </div>
+            
             <div class="ultima-verif">
                 Última verificación: <span id="ultimaVerif">-</span>
             </div>
@@ -372,6 +402,20 @@ DASHBOARD_HTML = """
                     const horas = Math.floor((ahora - inicio) / 3600000);
                     const mins = Math.floor(((ahora - inicio) % 3600000) / 60000);
                     document.getElementById('uptime').textContent = `${horas}h ${mins}m`;
+                }
+                
+                // HTTP status y tamaño
+                const httpCode = document.getElementById('httpCode');
+                const pageSize = document.getElementById('pageSize');
+                
+                if (data.ultimo_status_code) {
+                    httpCode.textContent = data.ultimo_status_code;
+                    httpCode.style.color = data.ultimo_status_code === 200 ? '#00ff88' : '#ff4757';
+                }
+                if (data.ultimo_tamaño_pagina) {
+                    const kb = (data.ultimo_tamaño_pagina / 1024).toFixed(1);
+                    pageSize.textContent = kb + ' KB';
+                    pageSize.style.color = data.ultimo_tamaño_pagina > 5000 ? '#00ff88' : '#ff4757';
                 }
                 
                 // Estado del indicador
