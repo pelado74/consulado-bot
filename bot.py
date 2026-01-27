@@ -42,7 +42,8 @@ estado = {
     "turnos_detectados": 0,
     "notificaciones_enviadas": 0,
     "errores": 0,
-    "historial": []
+    "historial": [],
+    "bot_activo": True
 }
 ultima_notificacion = 0
 # ===========================================
@@ -124,13 +125,15 @@ def notificar_todos():
     estado["notificaciones_enviadas"] += 1
     
     # Telegram
-    msg_tg = f"""🚨🚨🚨 <b>¡TURNOS DISPONIBLES!</b> 🚨🚨🚨
+    msg_tg = f"""🚨🚨🚨 ¡TURNOS DISPONIBLES! 🚨🚨🚨
 
 Matrícula Consular - Consulado España BA
 
-👉 <a href="{URL_TURNOS}">CLICK AQUÍ PARA RESERVAR</a>
+👉 LINK: {URL_TURNOS}
 
-⚡ ¡CORRÉ! Se agotan en segundos"""
+⚡ ¡CORRÉ! Se agotan en segundos
+
+⚠️ COPIÁ el link y abrilo en Safari/Chrome para que quede en tu historial"""
     
     if enviar_telegram(msg_tg):
         log("✅ Telegram enviado", "success")
@@ -199,6 +202,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(resultado).encode())
+        elif self.path == "/api/toggle":
+            estado["bot_activo"] = not estado["bot_activo"]
+            status = "activado" if estado["bot_activo"] else "pausado"
+            log(f"🔘 Bot {status}", "info")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"activo": estado["bot_activo"]}).encode())
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
@@ -403,6 +415,15 @@ DASHBOARD_HTML = """
             <div class="status-indicator">
                 <div class="pulse" id="statusPulse"></div>
                 <span id="statusText">Conectando...</span>
+                <button id="btnToggle" onclick="toggleBot()" style="
+                    margin-left: 15px;
+                    padding: 8px 16px;
+                    border: none;
+                    border-radius: 20px;
+                    font-size: 0.85em;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                ">⏸️ Pausar</button>
             </div>
             
             <div class="stats">
@@ -519,7 +540,21 @@ DASHBOARD_HTML = """
                 
                 // Estado del indicador
                 const pulse = document.getElementById('statusPulse');
+                const btnToggle = document.getElementById('btnToggle');
                 pulse.className = 'pulse';
+                
+                // Actualizar botón ON/OFF
+                if (data.bot_activo) {
+                    btnToggle.innerHTML = '⏸️ Pausar';
+                    btnToggle.style.background = '#ffa502';
+                    btnToggle.style.color = '#000';
+                } else {
+                    btnToggle.innerHTML = '▶️ Activar';
+                    btnToggle.style.background = '#00ff88';
+                    btnToggle.style.color = '#000';
+                    pulse.classList.add('warning');
+                }
+                
                 if (data.ultimo_estado.includes('TURNOS') || data.turnos_detectados > 0) {
                     pulse.classList.add('success');
                     document.getElementById('alertBanner').classList.add('show');
@@ -577,6 +612,18 @@ DASHBOARD_HTML = """
             btn.disabled = false;
             btn.innerHTML = '📨 Enviar Notificación de Prueba';
         }
+        
+        async function toggleBot() {
+            const btn = document.getElementById('btnToggle');
+            btn.disabled = true;
+            try {
+                await fetch('/api/toggle');
+                await actualizar();
+            } catch (e) {
+                console.error(e);
+            }
+            btn.disabled = false;
+        }
     </script>
 </body>
 </html>
@@ -596,6 +643,12 @@ def monitorear():
     estado["inicio"] = hora_argentina().isoformat()
     
     while True:
+        # Si el bot está pausado, solo esperar
+        if not estado["bot_activo"]:
+            estado["ultimo_estado"] = "⏸️ Bot pausado"
+            time.sleep(2)
+            continue
+        
         estado["verificaciones"] += 1
         estado["ultima_verificacion"] = hora_argentina().strftime("%H:%M:%S")
         
