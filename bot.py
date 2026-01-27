@@ -25,8 +25,11 @@ EMAILS_DESTINO = ["daniel@aldeavfx.com", "sabrinalugo@gmail.com"]
 # Variables de entorno (se configuran en Railway)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+# Email desactivado temporalmente (Railway no puede conectar a Gmail)
+# SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
+# SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_EMAIL = ""
+SMTP_PASSWORD = ""
 
 # Intervalos
 INTERVALO_NORMAL = 5
