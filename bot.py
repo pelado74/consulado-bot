@@ -129,11 +129,12 @@ def notificar_todos():
 
 Matrícula Consular - Consulado España BA
 
-👉 LINK: {URL_TURNOS}
-
 ⚡ ¡CORRÉ! Se agotan en segundos
 
-⚠️ COPIÁ el link y abrilo en Safari/Chrome para que quede en tu historial"""
+👉 Abrí este link en tu navegador:
+{URL_TURNOS}
+
+(Mantené presionado el link → "Abrir en Safari/Chrome")"""
     
     if enviar_telegram(msg_tg):
         log("✅ Telegram enviado", "success")
@@ -229,7 +230,12 @@ def enviar_test():
 🕐 Hora: {hora}
 📊 Verificaciones: {estado['verificaciones']}
 
-Este es un mensaje de prueba. Cuando haya turnos, recibirás una alerta similar pero con el link para reservar."""
+Este es un mensaje de prueba.
+
+👉 Link del consulado:
+{URL_TURNOS}
+
+(Mantené presionado → "Abrir en Safari/Chrome")"""
     
     if enviar_telegram(msg_tg):
         resultado["telegram"] = True
