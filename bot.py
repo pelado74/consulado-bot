@@ -102,7 +102,7 @@ def enviar_email(asunto, mensaje):
         </div>
         """
         msg.attach(MIMEText(html, 'html'))
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
         server.starttls()
         server.login(SMTP_EMAIL, SMTP_PASSWORD)
         for email in EMAILS_DESTINO:
@@ -221,10 +221,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def enviar_test():
     """Envía mensaje de prueba a todos los canales"""
-    resultado = {"telegram": False, "email": False, "errores": []}
+    resultado = {"telegram": False, "email": "enviando", "errores": []}
     hora = hora_argentina().strftime("%H:%M:%S")
     
-    # Test Telegram
+    # Test Telegram (rápido)
     msg_tg = f"""✅ <b>TEST - Bot Funcionando</b>
 
 🕐 Hora: {hora}
@@ -244,37 +244,42 @@ Este es un mensaje de prueba.
         resultado["errores"].append("Telegram: Token o Chat ID no configurado")
         log("❌ Test Telegram falló", "error")
     
-    # Test Email
+    # Test Email (en thread separado para no bloquear)
     if SMTP_EMAIL and SMTP_PASSWORD:
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = SMTP_EMAIL
-            msg['Subject'] = "✅ TEST - Bot Consulado España Funcionando"
-            html = f"""
-            <div style="font-family:Arial;padding:20px;text-align:center;">
-                <h1 style="color:#00aa55;">✅ Test Exitoso</h1>
-                <p>El bot está funcionando correctamente.</p>
-                <p>Hora del test: {hora}</p>
-                <p>Verificaciones realizadas: {estado['verificaciones']}</p>
-                <hr>
-                <p style="color:#666;">Cuando haya turnos disponibles, recibirás un email con el link para reservar.</p>
-            </div>
-            """
-            msg.attach(MIMEText(html, 'html'))
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(SMTP_EMAIL, SMTP_PASSWORD)
-            for email in EMAILS_DESTINO:
-                msg['To'] = email
-                server.send_message(msg)
-                del msg['To']
-            server.quit()
-            resultado["email"] = True
-            log("✅ Test Email enviado", "success")
-        except Exception as e:
-            resultado["errores"].append(f"Email: {str(e)[:50]}")
-            log(f"❌ Test Email falló: {e}", "error")
+        def enviar_email_async():
+            try:
+                msg = MIMEMultipart()
+                msg['From'] = SMTP_EMAIL
+                msg['Subject'] = "✅ TEST - Bot Consulado España Funcionando"
+                html = f"""
+                <div style="font-family:Arial;padding:20px;text-align:center;">
+                    <h1 style="color:#00aa55;">✅ Test Exitoso</h1>
+                    <p>El bot está funcionando correctamente.</p>
+                    <p>Hora del test: {hora}</p>
+                    <p>Verificaciones realizadas: {estado['verificaciones']}</p>
+                    <hr>
+                    <p style="color:#666;">Cuando haya turnos disponibles, recibirás un email con el link para reservar.</p>
+                </div>
+                """
+                msg.attach(MIMEText(html, 'html'))
+                server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
+                server.starttls()
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                for email in EMAILS_DESTINO:
+                    msg['To'] = email
+                    server.send_message(msg)
+                    del msg['To']
+                server.quit()
+                log("✅ Test Email enviado", "success")
+            except Exception as e:
+                log(f"❌ Test Email falló: {str(e)[:50]}", "error")
+        
+        # Lanzar en thread separado
+        thread_email = threading.Thread(target=enviar_email_async, daemon=True)
+        thread_email.start()
+        resultado["email"] = "enviando en background"
     else:
+        resultado["email"] = False
         resultado["errores"].append("Email: SMTP no configurado")
     
     return resultado
@@ -601,8 +606,10 @@ DASHBOARD_HTML = """
                 } else {
                     html += '<span style="color: #ff4757;">❌ Telegram falló</span><br>';
                 }
-                if (data.email) {
+                if (data.email === true) {
                     html += '<span style="color: #00ff88;">✅ Email enviado</span><br>';
+                } else if (data.email === "enviando en background") {
+                    html += '<span style="color: #ffa502;">⏳ Email enviando... (verificá en unos segundos)</span><br>';
                 } else {
                     html += '<span style="color: #ff4757;">❌ Email no configurado</span><br>';
                 }
