@@ -31,10 +31,6 @@ TELEGRAM_CHAT_ID = os.environ.get(“TELEGRAM_CHAT_ID”, “”)
 
 # Email desactivado temporalmente (Railway no puede conectar a Gmail)
 
-# SMTP_EMAIL = os.environ.get(“SMTP_EMAIL”, “”)
-
-# SMTP_PASSWORD = os.environ.get(“SMTP_PASSWORD”, “”)
-
 SMTP_EMAIL = “”
 SMTP_PASSWORD = “”
 
@@ -55,7 +51,8 @@ estado = {
 “notificaciones_enviadas”: 0,
 “errores”: 0,
 “historial”: [],
-“bot_activo”: True
+“bot_activo”: True,
+“hay_turnos_ahora”: False
 }
 ultima_notificacion = 0
 
@@ -69,7 +66,6 @@ hora = hora_argentina().strftime(”%H:%M:%S”)
 print(f”[{hora}] {mensaje}”, flush=True)
 
 ```
-# Guardar en historial (últimos 50)
 estado["historial"].append({
     "hora": hora,
     "mensaje": mensaje,
@@ -134,7 +130,6 @@ ultima_notificacion = ahora
 estado[“notificaciones_enviadas”] += 1
 
 ```
-# Telegram
 msg_tg = f"""🚨🚨🚨 ¡TURNOS DISPONIBLES! 🚨🚨🚨
 ```
 
@@ -151,7 +146,6 @@ Matrícula Consular - Consulado España BA
 if enviar_telegram(msg_tg):
     log("✅ Telegram enviado", "success")
 
-# Email
 if enviar_email("🚨 ¡TURNOS DISPONIBLES! - Consulado España", "¡Hay turnos! Entrá YA al link."):
     log("✅ Emails enviados", "success")
 ```
@@ -168,27 +162,21 @@ texto = r.text.lower()
 status = r.status_code
 
 ```
-    # Guardar info de debug
     estado["ultimo_status_code"] = status
     estado["ultimo_tamaño_pagina"] = len(r.text)
     
-    # Detectar 404 real (en el contenido)
     if "error 404" in texto or "página no encontrada" in texto:
         return False, f"⚠️ ERROR 404 (código: {status}, tamaño: {len(r.text)})"
     
-    # Detectar página correcta con mensaje de no disponibilidad
     if "en este momento no hay citas disponibles" in texto:
         return False, f"No hay citas (HTTP {status}, {len(r.text)} bytes)"
     
-    # Detectar si hay turnos disponibles
     if "alta en matrícula" in texto and "no hay citas" not in texto:
-        # Verificar si hay elementos de selección
         tiene_seleccion = any(x in texto for x in ["seleccione", "elegir fecha", "calendario", "horario disponible"])
         if tiene_seleccion:
             return True, "¡TURNOS DETECTADOS! - Hay opciones de selección"
         return True, "¡POSIBLES TURNOS! - Página cambió"
     
-    # Estado desconocido - loguear para debug
     return False, f"Estado desconocido (HTTP {status}, {len(r.text)} bytes)"
     
 except requests.exceptions.Timeout:
@@ -197,11 +185,43 @@ except Exception as e:
     return None, f"Error: {str(e)[:40]}"
 ```
 
-# ============== DASHBOARD WEB ==============
+def enviar_test():
+“”“Envía mensaje de prueba a todos los canales”””
+resultado = {“telegram”: False, “email”: “desactivado”, “errores”: []}
+hora = hora_argentina().strftime(”%H:%M:%S”)
+
+```
+msg_tg = f"""✅ <b>TEST - Bot Funcionando</b>
+```
+
+🕐 Hora: {hora}
+📊 Verificaciones: {estado[‘verificaciones’]}
+
+Este es un mensaje de prueba.
+
+👉 Link del consulado:
+{URL_TURNOS}
+
+(Mantené presionado → “Abrir en Safari/Chrome”)”””
+
+```
+if enviar_telegram(msg_tg):
+    resultado["telegram"] = True
+    log("✅ Test Telegram enviado", "success")
+else:
+    resultado["errores"].append("Telegram: Token o Chat ID no configurado")
+    log("❌ Test Telegram falló", "error")
+
+if not SMTP_EMAIL:
+    resultado["email"] = False
+    resultado["errores"].append("Email: Desactivado")
+
+return resultado
+```
 
 class DashboardHandler(BaseHTTPRequestHandler):
 def log_message(self, format, *args):
-pass  # Silenciar logs HTTP
+pass
 
 ```
 def do_GET(self):
@@ -232,75 +252,6 @@ def do_GET(self):
         self.send_header("Content-Type", "text/html")
         self.end_headers()
         self.wfile.write(DASHBOARD_HTML.encode())
-```
-
-def enviar_test():
-“”“Envía mensaje de prueba a todos los canales”””
-resultado = {“telegram”: False, “email”: “enviando”, “errores”: []}
-hora = hora_argentina().strftime(”%H:%M:%S”)
-
-```
-# Test Telegram (rápido)
-msg_tg = f"""✅ <b>TEST - Bot Funcionando</b>
-```
-
-🕐 Hora: {hora}
-📊 Verificaciones: {estado[‘verificaciones’]}
-
-Este es un mensaje de prueba.
-
-👉 Link del consulado:
-{URL_TURNOS}
-
-(Mantené presionado → “Abrir en Safari/Chrome”)”””
-
-```
-if enviar_telegram(msg_tg):
-    resultado["telegram"] = True
-    log("✅ Test Telegram enviado", "success")
-else:
-    resultado["errores"].append("Telegram: Token o Chat ID no configurado")
-    log("❌ Test Telegram falló", "error")
-
-# Test Email (en thread separado para no bloquear)
-if SMTP_EMAIL and SMTP_PASSWORD:
-    def enviar_email_async():
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = SMTP_EMAIL
-            msg['Subject'] = "✅ TEST - Bot Consulado España Funcionando"
-            html = f"""
-            <div style="font-family:Arial;padding:20px;text-align:center;">
-                <h1 style="color:#00aa55;">✅ Test Exitoso</h1>
-                <p>El bot está funcionando correctamente.</p>
-                <p>Hora del test: {hora}</p>
-                <p>Verificaciones realizadas: {estado['verificaciones']}</p>
-                <hr>
-                <p style="color:#666;">Cuando haya turnos disponibles, recibirás un email con el link para reservar.</p>
-            </div>
-            """
-            msg.attach(MIMEText(html, 'html'))
-            server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
-            server.starttls()
-            server.login(SMTP_EMAIL, SMTP_PASSWORD)
-            for email in EMAILS_DESTINO:
-                msg['To'] = email
-                server.send_message(msg)
-                del msg['To']
-            server.quit()
-            log("✅ Test Email enviado", "success")
-        except Exception as e:
-            log(f"❌ Test Email falló: {str(e)[:50]}", "error")
-    
-    # Lanzar en thread separado
-    thread_email = threading.Thread(target=enviar_email_async, daemon=True)
-    thread_email.start()
-    resultado["email"] = "enviando en background"
-else:
-    resultado["email"] = False
-    resultado["errores"].append("Email: SMTP no configurado")
-
-return resultado
 ```
 
 DASHBOARD_HTML = “””
@@ -344,6 +295,7 @@ DASHBOARD_HTML = “””
             gap: 15px;
             font-size: 1.5em;
             margin-bottom: 20px;
+            flex-wrap: wrap;
         }
         .pulse {
             width: 20px;
@@ -547,16 +499,14 @@ DASHBOARD_HTML = “””
             document.getElementById('statusText').textContent = data.ultimo_estado;
             document.getElementById('ultimaVerif').textContent = data.ultima_verificacion || '-';
             
-            // Calcular uptime
             if (data.inicio) {
                 const inicio = new Date(data.inicio);
                 const ahora = new Date();
                 const horas = Math.floor((ahora - inicio) / 3600000);
                 const mins = Math.floor(((ahora - inicio) % 3600000) / 60000);
-                document.getElementById('uptime').textContent = `${horas}h ${mins}m`;
+                document.getElementById('uptime').textContent = horas + 'h ' + mins + 'm';
             }
             
-            // HTTP status y tamaño
             const httpCode = document.getElementById('httpCode');
             const pageSize = document.getElementById('pageSize');
             
@@ -570,12 +520,10 @@ DASHBOARD_HTML = “””
                 pageSize.style.color = data.ultimo_tamaño_pagina > 5000 ? '#00ff88' : '#ff4757';
             }
             
-            // Estado del indicador
             const pulse = document.getElementById('statusPulse');
             const btnToggle = document.getElementById('btnToggle');
             pulse.className = 'pulse';
             
-            // Actualizar botón ON/OFF
             if (data.bot_activo) {
                 btnToggle.innerHTML = '⏸️ Pausar';
                 btnToggle.style.background = '#ffa502';
@@ -587,18 +535,20 @@ DASHBOARD_HTML = “””
                 pulse.classList.add('warning');
             }
             
-            if (data.ultimo_estado.includes('TURNOS') || data.turnos_detectados > 0) {
+            if (data.hay_turnos_ahora) {
                 pulse.classList.add('success');
                 document.getElementById('alertBanner').classList.add('show');
-            } else if (data.errores > 10) {
-                pulse.classList.add('error');
+            } else {
+                document.getElementById('alertBanner').classList.remove('show');
+                if (data.errores > 10) {
+                    pulse.classList.add('error');
+                }
             }
             
-            // Historial
             const historial = document.getElementById('historialLogs');
-            historial.innerHTML = data.historial.slice().reverse().map(log => 
-                `<div class="log-entry ${log.tipo}"><span class="time">${log.hora}</span>${log.mensaje}</div>`
-            ).join('');
+            historial.innerHTML = data.historial.slice().reverse().map(function(log) {
+                return '<div class="log-entry ' + log.tipo + '"><span class="time">' + log.hora + '</span>' + log.mensaje + '</div>';
+            }).join('');
             
         } catch (e) {
             document.getElementById('statusText').textContent = 'Error de conexión';
@@ -629,10 +579,8 @@ DASHBOARD_HTML = “””
             }
             if (data.email === true) {
                 html += '<span style="color: #00ff88;">✅ Email enviado</span><br>';
-            } else if (data.email === "enviando en background") {
-                html += '<span style="color: #ffa502;">⏳ Email enviando... (verificá en unos segundos)</span><br>';
             } else {
-                html += '<span style="color: #ff4757;">❌ Email no configurado</span><br>';
+                html += '<span style="color: #ff4757;">❌ Email desactivado</span><br>';
             }
             if (data.errores && data.errores.length > 0) {
                 html += '<br><span style="color: #ffa502; font-size: 0.85em;">' + data.errores.join('<br>') + '</span>';
@@ -671,15 +619,12 @@ server = HTTPServer((‘0.0.0.0’, port), DashboardHandler)
 log(f”🌐 Dashboard en puerto {port}”)
 server.serve_forever()
 
-# ============== LOOP PRINCIPAL ==============
-
 def monitorear():
 log(“🚀 Iniciando monitoreo…”)
 estado[“inicio”] = hora_argentina().isoformat()
 
 ```
 while True:
-    # Si el bot está pausado, solo esperar
     if not estado["bot_activo"]:
         estado["ultimo_estado"] = "⏸️ Bot pausado"
         time.sleep(2)
@@ -694,15 +639,18 @@ while True:
     if hay_turnos is True:
         estado["turnos_detectados"] += 1
         estado["ultimo_estado"] = f"🎉 ¡TURNOS DETECTADOS!"
+        estado["hay_turnos_ahora"] = True
         log(f"🎉 ¡TURNOS DETECTADOS! - {detalle}", "success")
         notificar_todos()
     elif hay_turnos is False:
         estado["ultimo_estado"] = detalle
+        estado["hay_turnos_ahora"] = False
         if estado["verificaciones"] % 50 == 0:
             log(f"Check #{estado['verificaciones']}: {detalle}")
     else:
         estado["errores"] += 1
         estado["ultimo_estado"] = f"⚠️ {detalle}"
+        estado["hay_turnos_ahora"] = False
         log(detalle, "error")
     
     time.sleep(intervalo)
@@ -714,11 +662,9 @@ print(“🇪🇸 BOT CONSULADO ESPAÑA - CON DASHBOARD”)
 print(”=” * 50)
 
 ```
-# Iniciar servidor web en thread separado
 thread_web = threading.Thread(target=iniciar_servidor_web, daemon=True)
 thread_web.start()
 
-# Iniciar monitoreo
 monitorear()
 ```
 
