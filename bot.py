@@ -55,8 +55,7 @@ estado = {
 “notificaciones_enviadas”: 0,
 “errores”: 0,
 “historial”: [],
-“bot_activo”: True,
-“hay_turnos_ahora”: False
+“bot_activo”: True
 }
 ultima_notificacion = 0
 
@@ -588,14 +587,11 @@ DASHBOARD_HTML = “””
                 pulse.classList.add('warning');
             }
             
-            if (data.hay_turnos_ahora) {
+            if (data.ultimo_estado.includes('TURNOS') || data.turnos_detectados > 0) {
                 pulse.classList.add('success');
                 document.getElementById('alertBanner').classList.add('show');
-            } else {
-                document.getElementById('alertBanner').classList.remove('show');
-                if (data.errores > 10) {
-                    pulse.classList.add('error');
-                }
+            } else if (data.errores > 10) {
+                pulse.classList.add('error');
             }
             
             // Historial
@@ -698,18 +694,15 @@ while True:
     if hay_turnos is True:
         estado["turnos_detectados"] += 1
         estado["ultimo_estado"] = f"🎉 ¡TURNOS DETECTADOS!"
-        estado["hay_turnos_ahora"] = True
         log(f"🎉 ¡TURNOS DETECTADOS! - {detalle}", "success")
         notificar_todos()
     elif hay_turnos is False:
         estado["ultimo_estado"] = detalle
-        estado["hay_turnos_ahora"] = False
         if estado["verificaciones"] % 50 == 0:
             log(f"Check #{estado['verificaciones']}: {detalle}")
     else:
         estado["errores"] += 1
         estado["ultimo_estado"] = f"⚠️ {detalle}"
-        estado["hay_turnos_ahora"] = False
         log(detalle, "error")
     
     time.sleep(intervalo)
