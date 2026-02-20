@@ -1,673 +1,223 @@
-
-“””
-Bot de Monitoreo - Consulado de España en Buenos Aires
-Con Dashboard Web incluido
-“””
-
 import requests
 import time
-import os
-import smtplib
 import threading
-import json
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import os
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask, jsonify
 import pytz
 
-# ============== CONFIGURACIÓN ==============
+app = Flask(__name__)
 
-URL_TURNOS = “https://www.cgeonline.com.ar/tramites/citas/varios/cita-varios.html?t=4”
-TZ_ARGENTINA = pytz.timezone(‘America/Argentina/Buenos_Aires’)
+# --- Config ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+URL_CONSULADO = "https://www.cgeonline.com.ar/tramites/citas/varios/cita-varios.html?t=4"
+URL_LINK = "https://www.cgeonline.com.ar/tramites/citas/varios/cita-varios.html?t=4"
+ZONA = pytz.timezone("America/Argentina/Buenos_Aires")
 
-# Emails a notificar
-
-EMAILS_DESTINO = [“daniel@aldeavfx.com”, “sabrinalugo@gmail.com”]
-
-# Variables de entorno (se configuran en Railway)
-
-TELEGRAM_BOT_TOKEN = os.environ.get(“TELEGRAM_BOT_TOKEN”, “”)
-TELEGRAM_CHAT_ID = os.environ.get(“TELEGRAM_CHAT_ID”, “”)
-
-# Email desactivado temporalmente (Railway no puede conectar a Gmail)
-
-SMTP_EMAIL = “”
-SMTP_PASSWORD = “”
-
-# Intervalos
-
-INTERVALO_NORMAL = 5
-INTERVALO_PICO = 2
-COOLDOWN_NOTIFICACION = 300
-
-# Estado global para el dashboard
-
+# --- State ---
 estado = {
-“inicio”: None,
-“verificaciones”: 0,
-“ultima_verificacion”: None,
-“ultimo_estado”: “Iniciando…”,
-“turnos_detectados”: 0,
-“notificaciones_enviadas”: 0,
-“errores”: 0,
-“historial”: [],
-“bot_activo”: True,
-“hay_turnos_ahora”: False
+    "activo": True,
+    "check_count": 0,
+    "ultimo_check": "Nunca",
+    "ultimo_status": "Iniciando...",
+    "http_status": None,
+    "page_size": None,
+    "hay_turnos": False,
+    "historial": []
 }
-ultima_notificacion = 0
 
-# ===========================================
+def log(msg):
+    ahora = datetime.now(ZONA).strftime("%H:%M:%S")
+    entrada = f"{ahora} {msg}"
+    estado["historial"].insert(0, entrada)
+    if len(estado["historial"]) > 50:
+        estado["historial"].pop()
+    print(entrada)
 
-def hora_argentina():
-return datetime.now(TZ_ARGENTINA)
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        log("Telegram no configurado")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg},
+            timeout=10
+        )
+        return r.status_code == 200
+    except Exception as e:
+        log(f"Error Telegram: {e}")
+        return False
 
-def log(mensaje, tipo=“info”):
-hora = hora_argentina().strftime(”%H:%M:%S”)
-print(f”[{hora}] {mensaje}”, flush=True)
+def check_turnos():
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        r = requests.get(URL_CONSULADO, headers=headers, timeout=15)
+        estado["http_status"] = r.status_code
+        estado["page_size"] = len(r.content)
+        texto = r.text.lower()
 
-```
-estado["historial"].append({
-    "hora": hora,
-    "mensaje": mensaje,
-    "tipo": tipo
-})
-if len(estado["historial"]) > 50:
-    estado["historial"] = estado["historial"][-50:]
-```
+        if r.status_code == 200 and "no hay citas disponibles" not in texto and len(r.content) > 3000:
+            return True
+        return False
+    except Exception as e:
+        log(f"Error al verificar: {e}")
+        return False
 
-def es_horario_pico():
-ahora = hora_argentina()
-h, m = ahora.hour, ahora.minute
-return (h == 10 and m >= 55) or (h == 11 and m <= 10)
+def bot_loop():
+    while True:
+        if not estado["activo"]:
+            time.sleep(5)
+            continue
 
-def enviar_telegram(mensaje):
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-return False
-try:
-url = f”https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage”
-data = {“chat_id”: TELEGRAM_CHAT_ID, “text”: mensaje, “parse_mode”: “HTML”}
-r = requests.post(url, data=data, timeout=10)
-return r.status_code == 200
-except:
-return False
+        ahora = datetime.now(ZONA)
+        # Check every 2 seconds between 10:55 and 11:10, otherwise every 5 seconds
+        if ahora.hour == 10 and ahora.minute >= 55:
+            intervalo = 2
+        elif ahora.hour == 11 and ahora.minute <= 10:
+            intervalo = 2
+        else:
+            intervalo = 5
 
-def enviar_email(asunto, mensaje):
-if not SMTP_EMAIL or not SMTP_PASSWORD:
-return False
-try:
-msg = MIMEMultipart()
-msg[‘From’] = SMTP_EMAIL
-msg[‘Subject’] = asunto
-html = f”””
-<div style="font-family:Arial;padding:20px;text-align:center;">
-<h1 style="color:#c41e3a;">🇪🇸 ¡TURNOS DISPONIBLES!</h1>
-<p style="font-size:18px;">{mensaje}</p>
-<a href="{URL_TURNOS}" style="display:inline-block;padding:20px 40px;background:#c41e3a;color:white;text-decoration:none;font-size:24px;border-radius:10px;margin:20px;">
-👉 RESERVAR AHORA 👈
-</a>
-</div>
-“””
-msg.attach(MIMEText(html, ‘html’))
-server = smtplib.SMTP(‘smtp.gmail.com’, 587, timeout=10)
-server.starttls()
-server.login(SMTP_EMAIL, SMTP_PASSWORD)
-for email in EMAILS_DESTINO:
-msg[‘To’] = email
-server.send_message(msg)
-del msg[‘To’]
-server.quit()
-return True
-except Exception as e:
-log(f”Error email: {e}”, “error”)
-return False
+        hay_turnos = check_turnos()
+        estado["check_count"] += 1
+        estado["ultimo_check"] = datetime.now(ZONA).strftime("%H:%M:%S")
 
-def notificar_todos():
-global ultima_notificacion
-ahora = time.time()
-if ahora - ultima_notificacion < COOLDOWN_NOTIFICACION:
-return
-ultima_notificacion = ahora
-estado[“notificaciones_enviadas”] += 1
+        if hay_turnos:
+            estado["hay_turnos"] = True
+            msg = (
+                "TURNOS DISPONIBLES en el Consulado!\n\n"
+                "Entra YA (copia y pega en Safari/Chrome):\n"
+                + URL_LINK +
+                "\n\n(Mantene presionado el link y abri en Safari/Chrome)"
+            )
+            send_telegram(msg)
+            log("TURNOS DISPONIBLES - Notificacion enviada!")
+            estado["ultimo_status"] = "TURNOS DISPONIBLES!"
+        else:
+            estado["hay_turnos"] = False
+            size_kb = round(estado["page_size"] / 1024, 1) if estado["page_size"] else 0
+            estado["ultimo_status"] = f"No hay citas (HTTP {estado['http_status']}, {size_kb} KB)"
+            log(f"Check #{estado['check_count']}: {estado['ultimo_status']}")
 
-```
-msg_tg = f"""🚨🚨🚨 ¡TURNOS DISPONIBLES! 🚨🚨🚨
-```
+        time.sleep(intervalo)
 
-Matrícula Consular - Consulado España BA
-
-⚡ ¡CORRÉ! Se agotan en segundos
-
-👉 Abrí este link en tu navegador:
-{URL_TURNOS}
-
-(Mantené presionado el link → “Abrir en Safari/Chrome”)”””
-
-```
-if enviar_telegram(msg_tg):
-    log("✅ Telegram enviado", "success")
-
-if enviar_email("🚨 ¡TURNOS DISPONIBLES! - Consulado España", "¡Hay turnos! Entrá YA al link."):
-    log("✅ Emails enviados", "success")
-```
-
-def verificar_turnos():
-try:
-headers = {
-“User-Agent”: “Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36”,
-“Accept”: “text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8”,
-“Accept-Language”: “es-AR,es;q=0.9”,
-}
-r = requests.get(URL_TURNOS, headers=headers, timeout=15)
-texto = r.text.lower()
-status = r.status_code
-
-```
-    estado["ultimo_status_code"] = status
-    estado["ultimo_tamaño_pagina"] = len(r.text)
-    
-    if "error 404" in texto or "página no encontrada" in texto:
-        return False, f"⚠️ ERROR 404 (código: {status}, tamaño: {len(r.text)})"
-    
-    if "en este momento no hay citas disponibles" in texto:
-        return False, f"No hay citas (HTTP {status}, {len(r.text)} bytes)"
-    
-    if "alta en matrícula" in texto and "no hay citas" not in texto:
-        tiene_seleccion = any(x in texto for x in ["seleccione", "elegir fecha", "calendario", "horario disponible"])
-        if tiene_seleccion:
-            return True, "¡TURNOS DETECTADOS! - Hay opciones de selección"
-        return True, "¡POSIBLES TURNOS! - Página cambió"
-    
-    return False, f"Estado desconocido (HTTP {status}, {len(r.text)} bytes)"
-    
-except requests.exceptions.Timeout:
-    return None, "Timeout - servidor lento"
-except Exception as e:
-    return None, f"Error: {str(e)[:40]}"
-```
-
-def enviar_test():
-“”“Envía mensaje de prueba a todos los canales”””
-resultado = {“telegram”: False, “email”: “desactivado”, “errores”: []}
-hora = hora_argentina().strftime(”%H:%M:%S”)
-
-```
-msg_tg = f"""✅ <b>TEST - Bot Funcionando</b>
-```
-
-🕐 Hora: {hora}
-📊 Verificaciones: {estado[‘verificaciones’]}
-
-Este es un mensaje de prueba.
-
-👉 Link del consulado:
-{URL_TURNOS}
-
-(Mantené presionado → “Abrir en Safari/Chrome”)”””
-
-```
-if enviar_telegram(msg_tg):
-    resultado["telegram"] = True
-    log("✅ Test Telegram enviado", "success")
-else:
-    resultado["errores"].append("Telegram: Token o Chat ID no configurado")
-    log("❌ Test Telegram falló", "error")
-
-if not SMTP_EMAIL:
-    resultado["email"] = False
-    resultado["errores"].append("Email: Desactivado")
-
-return resultado
-```
-
-class DashboardHandler(BaseHTTPRequestHandler):
-def log_message(self, format, *args):
-pass
-
-```
-def do_GET(self):
-    if self.path == "/api/estado":
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps(estado).encode())
-    elif self.path == "/api/test":
-        resultado = enviar_test()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps(resultado).encode())
-    elif self.path == "/api/toggle":
-        estado["bot_activo"] = not estado["bot_activo"]
-        status = "activado" if estado["bot_activo"] else "pausado"
-        log(f"🔘 Bot {status}", "info")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps({"activo": estado["bot_activo"]}).encode())
-    else:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-        self.wfile.write(DASHBOARD_HTML.encode())
-```
-
-DASHBOARD_HTML = “””
-
-<!DOCTYPE html>
-
+# --- Dashboard HTML ---
+HTML = """<!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🇪🇸 Bot Consulado España</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            color: #fff;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container { max-width: 800px; margin: 0 auto; }
-        h1 {
-            text-align: center;
-            font-size: 2em;
-            margin-bottom: 30px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        .flag { font-size: 1.2em; }
-        .status-card {
-            background: rgba(255,255,255,0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            margin-bottom: 20px;
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-        .status-indicator {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 15px;
-            font-size: 1.5em;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-        .pulse {
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            background: #00ff88;
-            animation: pulse 2s infinite;
-        }
-        .pulse.error { background: #ff4757; }
-        .pulse.warning { background: #ffa502; }
-        .pulse.success { background: #00ff88; animation: none; }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(1.2); }
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 15px;
-            margin-top: 20px;
-        }
-        .stat {
-            background: rgba(0,0,0,0.2);
-            padding: 20px;
-            border-radius: 15px;
-            text-align: center;
-        }
-        .stat-value {
-            font-size: 2em;
-            font-weight: bold;
-            color: #00ff88;
-        }
-        .stat-label {
-            font-size: 0.85em;
-            color: rgba(255,255,255,0.7);
-            margin-top: 5px;
-        }
-        .historial {
-            background: rgba(0,0,0,0.3);
-            border-radius: 15px;
-            padding: 20px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .historial h3 { margin-bottom: 15px; }
-        .log-entry {
-            padding: 8px 12px;
-            margin: 5px 0;
-            border-radius: 8px;
-            font-family: monospace;
-            font-size: 0.9em;
-            background: rgba(255,255,255,0.05);
-        }
-        .log-entry.success { border-left: 3px solid #00ff88; }
-        .log-entry.error { border-left: 3px solid #ff4757; }
-        .log-entry .time { color: #888; margin-right: 10px; }
-        .alert-banner {
-            background: linear-gradient(90deg, #ff4757, #c41e3a);
-            padding: 20px;
-            border-radius: 15px;
-            text-align: center;
-            font-size: 1.3em;
-            animation: shake 0.5s infinite;
-            display: none;
-        }
-        .alert-banner.show { display: block; }
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-5px); }
-            75% { transform: translateX(5px); }
-        }
-        .btn-reservar {
-            display: inline-block;
-            background: #fff;
-            color: #c41e3a;
-            padding: 15px 40px;
-            border-radius: 30px;
-            text-decoration: none;
-            font-weight: bold;
-            margin-top: 15px;
-            transition: transform 0.2s;
-        }
-        .btn-reservar:hover { transform: scale(1.05); }
-        .ultima-verif { text-align: center; color: rgba(255,255,255,0.5); margin-top: 10px; font-size: 0.9em; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bot Consulado</title>
+<style>
+  body { font-family: monospace; background: #0d0d0d; color: #00ff88; margin: 0; padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 5px; }
+  .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+  .pulse { display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #00ff88; animation: pulse 1.5s infinite; margin-right: 8px; }
+  .pulse.off { background: #ff4444; animation: none; }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.3)} }
+  .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 1em; margin: 5px; font-family: monospace; }
+  .btn-toggle { background: #f0a500; color: #000; }
+  .btn-toggle.off { background: #00cc66; color: #000; }
+  .btn-test { background: #6600cc; color: #fff; }
+  .btn-cita { background: #cc0000; color: #fff; font-size: 1.2em; padding: 15px 30px; width: 100%; margin: 0; }
+  .banner { background: #cc0000; color: #fff; text-align: center; padding: 20px; border-radius: 8px; font-size: 1.4em; font-weight: bold; animation: blink 0.5s infinite; margin-bottom: 15px; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .historial { max-height: 300px; overflow-y: auto; font-size: 0.85em; }
+  .historial div { border-bottom: 1px solid #222; padding: 4px 0; }
+  .stat { display: flex; justify-content: space-between; margin: 5px 0; }
+  .ok { color: #00ff88; } .warn { color: #f0a500; } .err { color: #ff4444; }
+  #result { margin-top: 10px; font-size: 0.9em; min-height: 20px; }
+</style>
 </head>
 <body>
-    <div class="container">
-        <h1><span class="flag">🇪🇸</span> Bot Consulado España</h1>
+<h1>Bot Consulado España</h1>
+<div id="banner" style="display:none" class="banner">TURNOS DISPONIBLES - ENTRA YA!</div>
 
-```
-    <div class="alert-banner" id="alertBanner">
-        🚨 ¡TURNOS DISPONIBLES! 🚨
-        <br>
-        <a href="https://www.cgeonline.com.ar/tramites/citas/varios/cita-varios.html?t=4" class="btn-reservar" target="_blank">
-            RESERVAR AHORA
-        </a>
-    </div>
-    
-    <div class="status-card">
-        <div class="status-indicator">
-            <div class="pulse" id="statusPulse"></div>
-            <span id="statusText">Conectando...</span>
-            <button id="btnToggle" onclick="toggleBot()" style="
-                margin-left: 15px;
-                padding: 8px 16px;
-                border: none;
-                border-radius: 20px;
-                font-size: 0.85em;
-                cursor: pointer;
-                transition: all 0.2s;
-            ">⏸️ Pausar</button>
-        </div>
-        
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-value" id="verificaciones">0</div>
-                <div class="stat-label">Verificaciones</div>
-            </div>
-            <div class="stat">
-                <div class="stat-value" id="notificaciones">0</div>
-                <div class="stat-label">Notificaciones</div>
-            </div>
-            <div class="stat">
-                <div class="stat-value" id="errores">0</div>
-                <div class="stat-label">Errores</div>
-            </div>
-            <div class="stat">
-                <div class="stat-value" id="uptime">0h</div>
-                <div class="stat-label">Tiempo activo</div>
-            </div>
-        </div>
-        
-        <div class="stats" style="margin-top: 15px;">
-            <div class="stat">
-                <div class="stat-value" id="httpCode" style="color: #ffa502;">-</div>
-                <div class="stat-label">HTTP Status</div>
-            </div>
-            <div class="stat">
-                <div class="stat-value" id="pageSize" style="color: #ffa502;">-</div>
-                <div class="stat-label">Tamaño página</div>
-            </div>
-        </div>
-        
-        <div class="ultima-verif">
-            Última verificación: <span id="ultimaVerif">-</span>
-        </div>
-        
-        <div style="text-align: center; margin-top: 25px;">
-            <a href="https://www.cgeonline.com.ar/tramites/citas/varios/cita-varios.html?t=4" target="_blank" style="
-                display: inline-block;
-                background: linear-gradient(135deg, #ff4757 0%, #c41e3a 100%);
-                color: white;
-                text-decoration: none;
-                padding: 20px 50px;
-                border-radius: 30px;
-                font-size: 1.3em;
-                font-weight: bold;
-                cursor: pointer;
-                transition: transform 0.2s, box-shadow 0.2s;
-                box-shadow: 0 6px 20px rgba(196, 30, 58, 0.5);
-                margin-bottom: 15px;
-            " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
-                🇪🇸 SOLICITAR CITA AHORA
-            </a>
-        </div>
-        
-        <div style="text-align: center; margin-top: 15px;">
-            <button id="btnTest" onclick="enviarTest()" style="
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                border: none;
-                padding: 15px 30px;
-                border-radius: 25px;
-                font-size: 1em;
-                cursor: pointer;
-                transition: transform 0.2s, box-shadow 0.2s;
-                box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-            ">
-                📨 Enviar Notificación de Prueba
-            </button>
-            <div id="testResult" style="margin-top: 15px; font-size: 0.9em;"></div>
-        </div>
-    </div>
-    
-    <div class="status-card historial">
-        <h3>📋 Historial</h3>
-        <div id="historialLogs"></div>
-    </div>
+<div class="card">
+  <button class="btn btn-cita" onclick="window.open('""" + URL_LINK + """','_blank')">SOLICITAR CITA AHORA</button>
+</div>
+
+<div class="card">
+  <div class="stat"><span><span class="pulse" id="pulso"></span><span id="estado-txt">Cargando...</span></span></div>
+  <div class="stat"><span>Verificaciones:</span><span id="checks">0</span></div>
+  <div class="stat"><span>Ultimo check:</span><span id="ultimo">-</span></div>
+  <div class="stat"><span>HTTP Status:</span><span id="http">-</span></div>
+  <div class="stat"><span>Tamano pagina:</span><span id="size">-</span></div>
+</div>
+
+<div class="card">
+  <button class="btn btn-toggle" id="btn-toggle" onclick="toggleBot()">Pausar</button>
+  <button class="btn btn-test" onclick="testNotif()">Enviar Notificacion de Prueba</button>
+  <div id="result"></div>
+</div>
+
+<div class="card">
+  <strong>Historial</strong>
+  <div class="historial" id="historial"></div>
 </div>
 
 <script>
-    async function actualizar() {
-        try {
-            const r = await fetch('/api/estado');
-            const data = await r.json();
-            
-            document.getElementById('verificaciones').textContent = data.verificaciones.toLocaleString();
-            document.getElementById('notificaciones').textContent = data.notificaciones_enviadas;
-            document.getElementById('errores').textContent = data.errores;
-            document.getElementById('statusText').textContent = data.ultimo_estado;
-            document.getElementById('ultimaVerif').textContent = data.ultima_verificacion || '-';
-            
-            if (data.inicio) {
-                const inicio = new Date(data.inicio);
-                const ahora = new Date();
-                const horas = Math.floor((ahora - inicio) / 3600000);
-                const mins = Math.floor(((ahora - inicio) % 3600000) / 60000);
-                document.getElementById('uptime').textContent = horas + 'h ' + mins + 'm';
-            }
-            
-            const httpCode = document.getElementById('httpCode');
-            const pageSize = document.getElementById('pageSize');
-            
-            if (data.ultimo_status_code) {
-                httpCode.textContent = data.ultimo_status_code;
-                httpCode.style.color = data.ultimo_status_code === 200 ? '#00ff88' : '#ff4757';
-            }
-            if (data.ultimo_tamaño_pagina) {
-                const kb = (data.ultimo_tamaño_pagina / 1024).toFixed(1);
-                pageSize.textContent = kb + ' KB';
-                pageSize.style.color = data.ultimo_tamaño_pagina > 5000 ? '#00ff88' : '#ff4757';
-            }
-            
-            const pulse = document.getElementById('statusPulse');
-            const btnToggle = document.getElementById('btnToggle');
-            pulse.className = 'pulse';
-            
-            if (data.bot_activo) {
-                btnToggle.innerHTML = '⏸️ Pausar';
-                btnToggle.style.background = '#ffa502';
-                btnToggle.style.color = '#000';
-            } else {
-                btnToggle.innerHTML = '▶️ Activar';
-                btnToggle.style.background = '#00ff88';
-                btnToggle.style.color = '#000';
-                pulse.classList.add('warning');
-            }
-            
-            if (data.hay_turnos_ahora) {
-                pulse.classList.add('success');
-                document.getElementById('alertBanner').classList.add('show');
-            } else {
-                document.getElementById('alertBanner').classList.remove('show');
-                if (data.errores > 10) {
-                    pulse.classList.add('error');
-                }
-            }
-            
-            const historial = document.getElementById('historialLogs');
-            historial.innerHTML = data.historial.slice().reverse().map(function(log) {
-                return '<div class="log-entry ' + log.tipo + '"><span class="time">' + log.hora + '</span>' + log.mensaje + '</div>';
-            }).join('');
-            
-        } catch (e) {
-            document.getElementById('statusText').textContent = 'Error de conexión';
-            document.getElementById('statusPulse').className = 'pulse error';
-        }
-    }
-    
-    actualizar();
-    setInterval(actualizar, 2000);
-    
-    async function enviarTest() {
-        const btn = document.getElementById('btnTest');
-        const result = document.getElementById('testResult');
-        
-        btn.disabled = true;
-        btn.innerHTML = '⏳ Enviando...';
-        result.innerHTML = '';
-        
-        try {
-            const r = await fetch('/api/test');
-            const data = await r.json();
-            
-            let html = '';
-            if (data.telegram) {
-                html += '<span style="color: #00ff88;">✅ Telegram enviado</span><br>';
-            } else {
-                html += '<span style="color: #ff4757;">❌ Telegram falló</span><br>';
-            }
-            if (data.email === true) {
-                html += '<span style="color: #00ff88;">✅ Email enviado</span><br>';
-            } else {
-                html += '<span style="color: #ff4757;">❌ Email desactivado</span><br>';
-            }
-            if (data.errores && data.errores.length > 0) {
-                html += '<br><span style="color: #ffa502; font-size: 0.85em;">' + data.errores.join('<br>') + '</span>';
-            }
-            result.innerHTML = html;
-            
-        } catch (e) {
-            result.innerHTML = '<span style="color: #ff4757;">Error de conexión</span>';
-        }
-        
-        btn.disabled = false;
-        btn.innerHTML = '📨 Enviar Notificación de Prueba';
-    }
-    
-    async function toggleBot() {
-        const btn = document.getElementById('btnToggle');
-        btn.disabled = true;
-        try {
-            await fetch('/api/toggle');
-            await actualizar();
-        } catch (e) {
-            console.error(e);
-        }
-        btn.disabled = false;
-    }
+function update() {
+  fetch('/api/estado').then(r=>r.json()).then(d=>{
+    document.getElementById('estado-txt').textContent = d.ultimo_status;
+    document.getElementById('checks').textContent = d.check_count;
+    document.getElementById('ultimo').textContent = d.ultimo_check;
+    document.getElementById('http').textContent = d.http_status || '-';
+    document.getElementById('size').textContent = d.page_size ? Math.round(d.page_size/1024*10)/10 + ' KB' : '-';
+    document.getElementById('banner').style.display = d.hay_turnos ? 'block' : 'none';
+    var pulso = document.getElementById('pulso');
+    pulso.className = d.activo ? 'pulse' : 'pulse off';
+    var btn = document.getElementById('btn-toggle');
+    btn.textContent = d.activo ? 'Pausar' : 'Activar';
+    btn.className = d.activo ? 'btn btn-toggle' : 'btn btn-toggle off';
+    var h = document.getElementById('historial');
+    h.innerHTML = d.historial.map(function(x){return '<div>'+x+'</div>';}).join('');
+  });
+}
+function toggleBot() {
+  fetch('/api/toggle',{method:'POST'}).then(()=>update());
+}
+function testNotif() {
+  document.getElementById('result').textContent = 'Enviando...';
+  fetch('/api/test',{method:'POST'}).then(r=>r.json()).then(d=>{
+    document.getElementById('result').textContent = d.telegram ? 'Telegram OK' : 'Telegram FALLO';
+  });
+}
+update();
+setInterval(update, 3000);
 </script>
-```
-
 </body>
 </html>
 """
 
-def iniciar_servidor_web():
-port = int(os.environ.get(“PORT”, 8080))
-server = HTTPServer((‘0.0.0.0’, port), DashboardHandler)
-log(f”🌐 Dashboard en puerto {port}”)
-server.serve_forever()
+@app.route("/")
+def dashboard():
+    return HTML
 
-def monitorear():
-log(“🚀 Iniciando monitoreo…”)
-estado[“inicio”] = hora_argentina().isoformat()
+@app.route("/api/estado")
+def api_estado():
+    return jsonify(estado)
 
-```
-while True:
-    if not estado["bot_activo"]:
-        estado["ultimo_estado"] = "⏸️ Bot pausado"
-        time.sleep(2)
-        continue
-    
-    estado["verificaciones"] += 1
-    estado["ultima_verificacion"] = hora_argentina().strftime("%H:%M:%S")
-    
-    intervalo = INTERVALO_PICO if es_horario_pico() else INTERVALO_NORMAL
-    hay_turnos, detalle = verificar_turnos()
-    
-    if hay_turnos is True:
-        estado["turnos_detectados"] += 1
-        estado["ultimo_estado"] = f"🎉 ¡TURNOS DETECTADOS!"
-        estado["hay_turnos_ahora"] = True
-        log(f"🎉 ¡TURNOS DETECTADOS! - {detalle}", "success")
-        notificar_todos()
-    elif hay_turnos is False:
-        estado["ultimo_estado"] = detalle
-        estado["hay_turnos_ahora"] = False
-        if estado["verificaciones"] % 50 == 0:
-            log(f"Check #{estado['verificaciones']}: {detalle}")
-    else:
-        estado["errores"] += 1
-        estado["ultimo_estado"] = f"⚠️ {detalle}"
-        estado["hay_turnos_ahora"] = False
-        log(detalle, "error")
-    
-    time.sleep(intervalo)
-```
+@app.route("/api/toggle", methods=["POST"])
+def api_toggle():
+    estado["activo"] = not estado["activo"]
+    log("Bot " + ("activado" if estado["activo"] else "pausado"))
+    return jsonify({"activo": estado["activo"]})
 
-def main():
-print(”=” * 50)
-print(“🇪🇸 BOT CONSULADO ESPAÑA - CON DASHBOARD”)
-print(”=” * 50)
+@app.route("/api/test", methods=["POST"])
+def api_test():
+    ok = send_telegram(
+        "Test de notificacion del Bot Consulado\n\nSi recibes este mensaje, Telegram funciona correctamente!\n\nLink consulado:\n" + URL_LINK
+    )
+    log("Test enviado - Telegram: " + ("OK" if ok else "FALLO"))
+    return jsonify({"telegram": ok})
 
-```
-thread_web = threading.Thread(target=iniciar_servidor_web, daemon=True)
-thread_web.start()
-
-monitorear()
-```
-
-if **name** == “**main**”:
-main()
+if __name__ == "__main__":
+    t = threading.Thread(target=bot_loop, daemon=True)
+    t.start()
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
