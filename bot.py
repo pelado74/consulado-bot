@@ -67,6 +67,18 @@ def check_turnos():
         log(f"Error al verificar: {e}")
         return False
 
+def self_ping():
+    """Ping own URL every 5 minutes to prevent sleep."""
+    app_url = os.environ.get("APP_URL", "")
+    if not app_url:
+        return
+    while True:
+        try:
+            requests.get(app_url, timeout=10)
+        except Exception:
+            pass
+        time.sleep(270)  # every 4.5 minutes
+
 def bot_loop():
     while True:
         if not estado["activo"]:
@@ -219,5 +231,7 @@ def api_test():
 if __name__ == "__main__":
     t = threading.Thread(target=bot_loop, daemon=True)
     t.start()
+    t2 = threading.Thread(target=self_ping, daemon=True)
+    t2.start()
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
